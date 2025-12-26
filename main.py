@@ -132,6 +132,7 @@ def issue_group_command(
     target_grid: tuple[int, int] | None,
     action_grid: tuple[int, int] | None = None,
     hunt_target: Animal | None = None,
+    label: str | None = None,
 ) -> None:
     for npc in npcs:
         if npc.group_id != group_id:
@@ -146,6 +147,7 @@ def issue_group_command(
         npc.action_grid = action_grid
         npc.hunt_target = hunt_target if job == "hunt" else None
         npc.eat_target = None
+        npc.current_command_label = label
         npc.path = []
         npc.path_index = 0
         npc.path_retries = 0
@@ -159,6 +161,7 @@ def issue_npc_command(
     target_grid: tuple[int, int] | None,
     action_grid: tuple[int, int] | None = None,
     hunt_target: Animal | None = None,
+    label: str | None = None,
 ) -> None:
     npc.job = job
     npc.job_lock_timer = 0.0
@@ -170,6 +173,7 @@ def issue_npc_command(
     npc.action_grid = action_grid
     npc.hunt_target = hunt_target if job == "hunt" else None
     npc.eat_target = None
+    npc.current_command_label = label
     npc.path = []
     npc.path_index = 0
     npc.path_retries = 0
@@ -199,6 +203,122 @@ def infer_manual_command(
     if tile == "rock":
         return ("mine", None, grid_pos, None, "Mine rock")
     return ("move", grid_pos, None, None, "Move")
+
+
+def find_nearest_tile(
+    world: World,
+    center_grid: tuple[int, int],
+    target: str,
+    radius: int = 12,
+) -> tuple[int, int] | None:
+    best = None
+    best_dist = None
+    for y in range(center_grid[1] - radius, center_grid[1] + radius + 1):
+        for x in range(center_grid[0] - radius, center_grid[0] + radius + 1):
+            if world.get_tile((x, y)) != target:
+                continue
+            dist = abs(x - center_grid[0]) + abs(y - center_grid[1])
+            if best is None or dist < best_dist:
+                best = (x, y)
+                best_dist = dist
+    return best
+
+
+def can_place_npc_build(world: World, grid_pos: tuple[int, int], build_item: str) -> bool:
+    tile = world.get_tile(grid_pos)
+    if build_item == "wall":
+        return tile in {"ground", "floor", "sand"}
+    if build_item == "stone_wall":
+        return tile in {"ground", "floor", "sand", "stone_floor"}
+    if build_item == "floor":
+        return tile in {"ground", "sand"}
+    if build_item == "stone_floor":
+        return tile in {"ground", "sand", "floor"}
+    if build_item == "road":
+        return tile in {"ground", "sand", "floor", "stone_floor"}
+    if build_item == "workbench":
+        return tile == "floor"
+    if build_item == "crate":
+        return tile == "floor"
+    if build_item == "furnace":
+        return tile in {"floor", "stone_floor"}
+    if build_item == "door":
+        return tile in {"ground", "floor"}
+    return False
+
+
+def queue_build_for_npc(
+    npc: NPC,
+    group: NPCGroup,
+    world: World,
+    build_item: str,
+    build_pos: tuple[int, int],
+    append: bool,
+) -> tuple[bool, str]:
+    if not can_place_npc_build(world, build_pos, build_item):
+        return False, "Can't build here"
+    if not append:
+        npc.command_queue.clear()
+    cost = BUILD_ITEMS.get(build_item, {"wood": 2})
+    missing_wood = max(0, cost.get("wood", 0) - group.stockpile.get("wood", 0))
+    missing_stone = max(0, cost.get("stone", 0) - group.stockpile.get("stone", 0))
+    home = group.home_grid
+    tree_jobs = (missing_wood + 1) // 2
+    rock_jobs = (missing_stone + 1) // 2
+    for _ in range(tree_jobs):
+        tree_pos = find_nearest_tile(world, home, "tree", radius=16)
+        if tree_pos is None:
+            break
+        npc.command_queue.append(("chop", None, tree_pos, None, "Chop tree"))
+        npc.command_queue.append(("haul", None, None, None, "Haul stock"))
+    for _ in range(rock_jobs):
+        rock_pos = find_nearest_tile(world, home, "rock", radius=16)
+        if rock_pos is None:
+            break
+        npc.command_queue.append(("mine", None, rock_pos, None, "Mine rock"))
+        npc.command_queue.append(("haul", None, None, None, "Haul stock"))
+    if (build_pos, build_item) not in group.build_queue:
+        group.build_queue.insert(0, (build_pos, build_item))
+    npc.command_queue.append(("build", None, None, None, f"Build {build_item}"))
+    if npc.job in {"idle", "wander"}:
+        issue_npc_command(npc, "idle", None, None, None, None)
+    return True, f"Build {build_item}"
+
+
+def queue_npc_command(
+    npc: NPC,
+    job: str,
+    target_grid: tuple[int, int] | None,
+    action_grid: tuple[int, int] | None,
+    hunt_target: Animal | None,
+    label: str,
+    append: bool,
+) -> None:
+    if not append:
+        npc.command_queue.clear()
+        issue_npc_command(npc, job, target_grid, action_grid, hunt_target, label)
+        return
+    npc.command_queue.append((job, target_grid, action_grid, hunt_target, label))
+
+
+def queue_group_command(
+    npcs: list[NPC],
+    group_id: int,
+    job: str,
+    target_grid: tuple[int, int] | None,
+    action_grid: tuple[int, int] | None,
+    hunt_target: Animal | None,
+    label: str,
+    append: bool,
+) -> None:
+    for npc in npcs:
+        if npc.group_id != group_id:
+            continue
+        if not append:
+            npc.command_queue.clear()
+            issue_npc_command(npc, job, target_grid, action_grid, hunt_target, label)
+        else:
+            npc.command_queue.append((job, target_grid, action_grid, hunt_target, label))
 
 
 def can_place_building(world: World, player: Player, grid_pos: tuple[int, int], build_item: str) -> bool:
@@ -682,6 +802,107 @@ def draw_group_panel(
     return panel_rect
 
 
+def draw_manual_control_panel(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    npcs: list[NPC],
+    selected_group_id: int | None,
+    selected_npc_id: int | None,
+    command_mode: str | None,
+    build_item: str,
+) -> dict[str, object]:
+    members = []
+    if selected_group_id is not None:
+        members = [n for n in npcs if n.group_id == selected_group_id]
+        members.sort(key=lambda npc: npc.npc_id)
+    items = ["Manual Control"]
+    items.append("LMB select NPC / group")
+    items.append("RMB command, Shift+RMB queue")
+    if command_mode:
+        items.append(f"Mode: {command_mode}")
+    if selected_group_id is None:
+        items.append("No group selected")
+    else:
+        items.append(f"Group g{selected_group_id} members {len(members)}")
+        for npc in members[:8]:
+            marker = ">" if npc.npc_id == selected_npc_id else " "
+            label = npc.current_command_label or npc.job
+            items.append(f"{marker} NPC {npc.npc_id} {label} q:{len(npc.command_queue)}")
+        if len(members) > 8:
+            items.append(f"... {len(members) - 8} more")
+        if selected_npc_id is not None:
+            npc = next((n for n in members if n.npc_id == selected_npc_id), None)
+            if npc is not None:
+                items.append("")
+                items.append(f"NPC {npc.npc_id} queue")
+                if not npc.command_queue:
+                    items.append("  (empty)")
+                else:
+                    for cmd in npc.command_queue[:5]:
+                        items.append(f"  {cmd[4]}")
+                    if len(npc.command_queue) > 5:
+                        items.append(f"  ... {len(npc.command_queue) - 5} more")
+    panel_w = 360
+    line_h = font.get_linesize() + 5
+    panel_h = 16 + len(items) * line_h + 110
+    panel_x = 20
+    panel_y = 20
+    panel_rect = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+
+    panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    panel.fill((8, 10, 14, 220))
+    pygame.draw.rect(panel, (40, 50, 60), panel.get_rect(), 2)
+    surface.blit(panel, panel_rect.topleft)
+
+    y = panel_y + 10
+    for idx, text in enumerate(items):
+        color = COLORS["ui_accent"] if idx == 0 else COLORS["ui_text"]
+        surface.blit(font.render(text, True, color), (panel_x + 10, y))
+        y += line_h
+
+    y += 4
+    commands = [
+        ("move", "Move"),
+        ("chop", "Chop"),
+        ("mine", "Mine"),
+        ("gather_food", "Gather"),
+        ("hunt", "Hunt"),
+        ("build", "Build"),
+    ]
+    buttons: list[tuple[pygame.Rect, str]] = []
+    btn_w = 100
+    btn_h = 24
+    for idx, (cmd, label) in enumerate(commands):
+        col = idx % 3
+        row = idx // 3
+        rect = pygame.Rect(panel_x + 10 + col * (btn_w + 8), y + row * (btn_h + 6), btn_w, btn_h)
+        active = cmd == command_mode
+        pygame.draw.rect(surface, (60, 80, 100) if active else (30, 35, 45), rect)
+        pygame.draw.rect(surface, (120, 140, 160), rect, 1)
+        surface.blit(font.render(label, True, COLORS["ui_text"]), (rect.x + 6, rect.y + 4))
+        buttons.append((rect, cmd))
+
+    y += 2 * (btn_h + 6) + 6
+    build_items = ["wall", "floor", "door", "workbench", "crate", "furnace", "stone_wall", "stone_floor", "road"]
+    build_rects: list[tuple[pygame.Rect, str]] = []
+    if command_mode == "build":
+        surface.blit(font.render("Build:", True, COLORS["ui_text"]), (panel_x + 10, y))
+        y += line_h
+        for idx, name in enumerate(build_items):
+            rect = pygame.Rect(panel_x + 10 + (idx % 3) * 110, y + (idx // 3) * (btn_h + 4), 104, btn_h)
+            active = name == build_item
+            pygame.draw.rect(surface, (70, 90, 70) if active else (26, 30, 34), rect)
+            pygame.draw.rect(surface, (100, 120, 140), rect, 1)
+            surface.blit(font.render(name[:10], True, COLORS["ui_text"]), (rect.x + 6, rect.y + 4))
+            build_rects.append((rect, name))
+
+    return {
+        "panel": panel_rect,
+        "buttons": buttons,
+        "build_items": build_rects,
+    }
+
+
 def draw_village_debug_panel(
     surface: pygame.Surface,
     font: pygame.font.Font,
@@ -1103,6 +1324,7 @@ class Game:
         cave_entry_timer = 0.0
         ui_state: dict[str, object] = {}
         debug_ui_state: dict[str, object] = {}
+        manual_ui_state: dict[str, object] = {}
 
         seed_player_civ(overworld, overworld.to_grid(player.position), civ_regions)
 
@@ -1170,6 +1392,24 @@ class Game:
                         ui.civ_debug_view = not ui.civ_debug_view
                     elif event.key == pygame.K_F6:
                         ui.manual_npc_control = not ui.manual_npc_control
+                        if ui.manual_npc_control:
+                            for npc in npcs:
+                                npc.job = "idle"
+                                npc.job_lock_timer = 0.0
+                                npc.task_timer = 0.0
+                                npc.task_key = None
+                                npc.task_commit_timer = 0.0
+                                npc.target_grid = None
+                                npc.action_grid = None
+                                npc.hunt_target = None
+                                npc.eat_target = None
+                                npc.path = []
+                                npc.path_index = 0
+                                npc.path_retries = 0
+                                npc.path_target = None
+                                npc.path_cooldown = 0.0
+                                npc.command_queue.clear()
+                                npc.current_command_label = None
                     elif event.key in (pygame.K_EQUALS, pygame.K_KP_PLUS):
                         ui.minimap_zoom = min(3, ui.minimap_zoom + 1)
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -1353,7 +1593,24 @@ class Game:
                         continue
                     if ui_consumed:
                         continue
+                    if ui.manual_npc_control and event.button == 1:
+                        panel = manual_ui_state.get("panel")
+                        if panel is not None and panel.collidepoint(event.pos):
+                            for rect, cmd in manual_ui_state.get("buttons", []):
+                                if rect.collidepoint(event.pos):
+                                    ui.manual_command_mode = cmd
+                                    ui_consumed = True
+                                    break
+                            if not ui_consumed and ui.manual_command_mode == "build":
+                                for rect, name in manual_ui_state.get("build_items", []):
+                                    if rect.collidepoint(event.pos):
+                                        ui.manual_build_item = name
+                                        ui_consumed = True
+                                        break
+                            if ui_consumed:
+                                continue
                     if event.button == 3 and ui.manual_npc_control and not ui.build_mode and not in_cave:
+                        append_command = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
                         selected_npc = None
                         if ui.selected_npc_id is not None:
                             selected_npc = next((n for n in npcs if n.npc_id == ui.selected_npc_id), None)
@@ -1364,31 +1621,131 @@ class Game:
                             actions.status_timer = 1.2
                         else:
                             mouse_world = camera.screen_to_world(pygame.Vector2(event.pos))
-                            job, target_grid, action_grid, hunt_target, label = infer_manual_command(
-                                overworld,
-                                plants,
-                                animals,
-                                mouse_world,
-                            )
-                            if selected_npc is not None:
-                                issue_npc_command(
-                                    selected_npc,
-                                    job,
-                                    target_grid,
-                                    action_grid,
-                                    hunt_target,
-                                )
-                                actions.status_message = f"NPC: {label}"
+                            if ui.manual_command_mode:
+                                mode = ui.manual_command_mode
+                                grid_pos = overworld.to_grid(mouse_world)
+                                tile = overworld.get_tile(grid_pos)
+                                command_job = mode
+                                command_label = mode
+                                target_grid = None
+                                action_grid = None
+                                hunt_target = None
+                                if mode == "move":
+                                    target_grid = grid_pos
+                                    command_label = "Move"
+                                elif mode == "chop":
+                                    if tile != "tree":
+                                        actions.status_message = "Target a tree"
+                                        actions.status_timer = 1.0
+                                        ui_consumed = True
+                                        continue
+                                    action_grid = grid_pos
+                                    command_label = "Chop tree"
+                                elif mode == "mine":
+                                    if tile != "rock":
+                                        actions.status_message = "Target a rock"
+                                        actions.status_timer = 1.0
+                                        ui_consumed = True
+                                        continue
+                                    action_grid = grid_pos
+                                    command_label = "Mine rock"
+                                elif mode == "gather_food":
+                                    if grid_pos not in plants.plants:
+                                        actions.status_message = "Target a plant"
+                                        actions.status_timer = 1.0
+                                        ui_consumed = True
+                                        continue
+                                    action_grid = grid_pos
+                                    command_label = "Gather plant"
+                                elif mode == "hunt":
+                                    hunt_target = next((a for a in animals if a.rect.collidepoint(mouse_world)), None)
+                                    if hunt_target is None:
+                                        actions.status_message = "Target an animal"
+                                        actions.status_timer = 1.0
+                                        ui_consumed = True
+                                        continue
+                                    command_label = f"Hunt {hunt_target.species}"
+                                elif mode == "build":
+                                    build_item = ui.manual_build_item
+                                    if selected_npc is None:
+                                        leader = next((n for n in npcs if n.group_id == ui.selected_group_id and n.leader), None)
+                                        selected_npc = leader
+                                    if selected_npc is None:
+                                        actions.status_message = "Select an NPC"
+                                        actions.status_timer = 1.0
+                                        ui_consumed = True
+                                        continue
+                                    group = npc_groups.get(selected_npc.group_id)
+                                    if group is None:
+                                        actions.status_message = "No group"
+                                        actions.status_timer = 1.0
+                                        ui_consumed = True
+                                        continue
+                                    ok, msg = queue_build_for_npc(
+                                        selected_npc,
+                                        group,
+                                        overworld,
+                                        build_item,
+                                        grid_pos,
+                                        append_command,
+                                    )
+                                    actions.status_message = f"NPC: {msg}"
+                                    actions.status_timer = 1.0
+                                    ui_consumed = True
+                                    continue
+                                if selected_npc is not None:
+                                    queue_npc_command(
+                                        selected_npc,
+                                        command_job,
+                                        target_grid,
+                                        action_grid,
+                                        hunt_target,
+                                        command_label,
+                                        append_command,
+                                    )
+                                    actions.status_message = f"NPC: {command_label}"
+                                else:
+                                    queue_group_command(
+                                        npcs,
+                                        ui.selected_group_id,
+                                        command_job,
+                                        target_grid,
+                                        action_grid,
+                                        hunt_target,
+                                        command_label,
+                                        append_command,
+                                    )
+                                    actions.status_message = f"Group: {command_label}"
                             else:
-                                issue_group_command(
-                                    npcs,
-                                    ui.selected_group_id,
-                                    job,
-                                    target_grid,
-                                    action_grid,
-                                    hunt_target,
+                                job, target_grid, action_grid, hunt_target, label = infer_manual_command(
+                                    overworld,
+                                    plants,
+                                    animals,
+                                    mouse_world,
                                 )
-                                actions.status_message = f"Group: {label}"
+                                if selected_npc is not None:
+                                    queue_npc_command(
+                                        selected_npc,
+                                        job,
+                                        target_grid,
+                                        action_grid,
+                                        hunt_target,
+                                        label,
+                                        append_command,
+                                    )
+                                    actions.status_message = f"NPC: {label}"
+                                else:
+                                    queue_group_command(
+                                        npcs,
+                                        ui.selected_group_id,
+                                        job,
+                                        target_grid,
+                                        action_grid,
+                                        hunt_target,
+                                        label,
+                                        append_command,
+                                    )
+                                    actions.status_message = f"Group: {label}"
                             actions.status_timer = 0.8
                         ui_consumed = True
                     if ui_consumed:
@@ -1988,12 +2345,18 @@ class Game:
             if ui.manual_npc_control and not ui.inventory_open and not ui.map_open and not ui.build_mode and not in_cave:
                 mouse_pos = pygame.Vector2(pygame.mouse.get_pos())
                 mouse_world = camera.screen_to_world(mouse_pos)
-                _job, _tgt, _act, _hunt, label = infer_manual_command(
-                    overworld,
-                    plants,
-                    animals,
-                    mouse_world,
-                )
+                if ui.manual_command_mode:
+                    if ui.manual_command_mode == "build":
+                        label = f"Build {ui.manual_build_item}"
+                    else:
+                        label = ui.manual_command_mode
+                else:
+                    _job, _tgt, _act, _hunt, label = infer_manual_command(
+                        overworld,
+                        plants,
+                        animals,
+                        mouse_world,
+                    )
                 selected_label = None
                 if ui.selected_npc_id is not None:
                     selected_label = f"NPC {ui.selected_npc_id}"
@@ -2002,7 +2365,7 @@ class Game:
                 if selected_label is None:
                     hint = "RMB: select NPC or group"
                 else:
-                    hint = f"RMB: {label} ({selected_label})"
+                    hint = f"RMB: {label} ({selected_label})  Shift: queue"
                 hint_surf = font.render(hint, True, COLORS["ui_text"])
                 pad = 6
                 hint_rect = hint_surf.get_rect()
@@ -2037,6 +2400,18 @@ class Game:
                 )
             else:
                 debug_ui_state = {}
+            if ui.manual_npc_control:
+                manual_ui_state = draw_manual_control_panel(
+                    screen,
+                    font,
+                    npcs,
+                    ui.selected_group_id,
+                    ui.selected_npc_id,
+                    ui.manual_command_mode,
+                    ui.manual_build_item,
+                )
+            else:
+                manual_ui_state = {}
             if ui.civ_debug_view and civ_event_log:
                 draw_civ_debug_panel(screen, font, civ_event_log, civ_raid_log)
 

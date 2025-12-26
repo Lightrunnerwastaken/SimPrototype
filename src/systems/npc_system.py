@@ -542,6 +542,25 @@ def update_npcs(
             move_dir = resolve_move_dir(npc, get_move_dir_to_target(npc, target), world)
         steer_npc(npc, move_dir, speed)
 
+    def apply_manual_command(npc: NPC, command: tuple[str, tuple[int, int] | None, tuple[int, int] | None, object | None, str]) -> None:
+        job, target_grid, action_grid, hunt_target, label = command
+        npc.job = job
+        npc.job_lock_timer = 0.0
+        npc.task_timer = 0.0
+        npc.task_key = None
+        npc.task_commit_timer = 0.0
+        npc.task_cooldowns.pop(job, None)
+        npc.target_grid = target_grid
+        npc.action_grid = action_grid
+        npc.hunt_target = hunt_target if job == "hunt" else None
+        npc.eat_target = None
+        npc.path = []
+        npc.path_index = 0
+        npc.path_retries = 0
+        npc.path_target = None
+        npc.path_cooldown = 0.0
+        npc.current_command_label = label
+
     path_cache: dict[tuple[int, int, int, int], tuple[list[tuple[int, int]], float]] = {}
 
     def find_path_avoiding(
@@ -831,6 +850,10 @@ def update_npcs(
             if npc.job not in task_jobs and npc.task_key is not None:
                 npc.task_key = None
                 npc.task_commit_timer = 0.0
+            if manual_control and npc.job in {"idle", "wander"} and npc.command_queue:
+                apply_manual_command(npc, npc.command_queue.pop(0))
+            if manual_control and npc.job == "idle" and not npc.command_queue:
+                npc.current_command_label = None
             if npc.job in task_jobs:
                 if npc.task_key != npc.job:
                     npc.task_key = npc.job
@@ -1096,6 +1119,12 @@ def update_npcs(
                         else:
                             drive_to_target(npc, npc.target_grid, 55)
             if npc.job == "hunt":
+                if manual_control and npc.hunt_target is None:
+                    npc.job = "idle"
+                    npc.job_lock_timer = 0.2
+                    npc.target_grid = None
+                    npc.action_grid = None
+                    continue
                 if npc.hunt_target is not None and npc.hunt_target not in animals:
                     npc.hunt_target = None
                 if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
@@ -1264,6 +1293,12 @@ def update_npcs(
                 else:
                     drive_to_target(npc, npc.target_grid, 55)
             if npc.job == "chop":
+                if manual_control and npc.action_grid is None:
+                    npc.job = "idle"
+                    npc.job_lock_timer = 0.2
+                    npc.target_grid = None
+                    npc.action_grid = None
+                    continue
                 if npc.target_grid is None:
                     if npc.action_grid is None:
                         if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
@@ -1355,6 +1390,12 @@ def update_npcs(
                 else:
                     drive_to_target(npc, npc.target_grid, 65)
             if npc.job == "mine":
+                if manual_control and npc.action_grid is None:
+                    npc.job = "idle"
+                    npc.job_lock_timer = 0.2
+                    npc.target_grid = None
+                    npc.action_grid = None
+                    continue
                 if group.tools.get("pickaxe", 0) <= 0:
                     npc.job = "idle"
                     npc.job_lock_timer = 0.4
@@ -1441,6 +1482,12 @@ def update_npcs(
                             drive_to_target(npc, npc.target_grid, 55)
 
             elif npc.job == "gather_food":
+                if manual_control and npc.action_grid is None:
+                    npc.job = "idle"
+                    npc.job_lock_timer = 0.2
+                    npc.target_grid = None
+                    npc.action_grid = None
+                    continue
                 if npc.action_grid is None:
                     if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
                         door = find_home_door(group, world)

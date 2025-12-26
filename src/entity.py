@@ -185,6 +185,8 @@ class NPC:
         self.eat_timer = 0.0
         self.hunt_target = None
         self.eat_target = None
+        self.command_queue: list[tuple[str, tuple[int, int] | None, tuple[int, int] | None, object | None, str]] = []
+        self.current_command_label: str | None = None
         self.stuck_events = 0
         self.path_failures = 0
         self.door_waits = 0
