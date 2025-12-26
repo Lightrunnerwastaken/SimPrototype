@@ -16,13 +16,13 @@ def resolve_move_dir(entity, desired: pygame.Vector2, world) -> pygame.Vector2:
         return desired
 
     desired = desired.normalize()
-    next_pos = entity.position + desired * TILE_SIZE * 0.6
+    next_pos = entity.position + desired * TILE_SIZE * 0.45
     if world.tile_at_px(next_pos) != "water" and not world.rect_collides(entity.rect_at(next_pos)):
         return desired
 
-    for angle in (45, -45, 90, -90, 135, -135):
+    for angle in (45, -45, 90, -90):
         rotated = desired.rotate(angle)
-        next_pos = entity.position + rotated * TILE_SIZE * 0.6
+        next_pos = entity.position + rotated * TILE_SIZE * 0.45
         if world.tile_at_px(next_pos) != "water" and not world.rect_collides(entity.rect_at(next_pos)):
             return rotated
 

@@ -444,6 +444,7 @@ def update_npcs(
     animals: list[Animal],
     carcasses: list[Carcass],
     dt: float,
+    manual_control: bool = False,
     raids: list[dict[str, object]] | None = None,
     debug: dict[int, dict[str, str]] | None = None,
 ) -> None:
@@ -473,6 +474,7 @@ def update_npcs(
             "craft_weapon": "craft_weapon",
             "raid": "raid",
             "return_home": "return_home",
+            "move": "move",
             "wander": "wander",
             "idle": "idle",
         }.get(job, job)
@@ -714,7 +716,7 @@ def update_npcs(
             if cohesion_force.length_squared() > 0:
                 cohesion_force = cohesion_force.normalize()
 
-        if leader.job == "wander" or leader.job == "idle":
+        if not manual_control and (leader.job == "wander" or leader.job == "idle"):
             leader.state_timer -= dt
             if leader.state_timer <= 0 or leader.wander_dir.length_squared() == 0:
                 leader.wander_dir = random_dir()
@@ -781,7 +783,7 @@ def update_npcs(
                 npc.travel_samples += 1
                 npc.travel_timer = 0.0
                 npc.travel_target = None
-            if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) > group.home_radius + 4:
+            if not manual_control and abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) > group.home_radius + 4:
                 if npc.inventory.get("wood", 0) > 0 or npc.inventory.get("food", 0) > 0 or npc.inventory.get("stone", 0) > 0:
                     npc.job = "haul"
                     npc.action_grid = None
@@ -816,7 +818,7 @@ def update_npcs(
                     npc.recover_return_action = None
                     npc.recover_start_grid = None
                 continue
-            if npc.job in {"build", "chop", "gather_food", "haul", "mine", "hunt", "haul_meat"} and moved < 0.15:
+            if npc.job in {"build", "chop", "gather_food", "haul", "mine", "hunt", "haul_meat", "move"} and moved < 0.15:
                 # Don't treat active work as "stuck" or it will cancel tasks mid-action.
                 if npc.task_timer <= 0.0:
                     npc.stuck_timer += dt
@@ -910,10 +912,10 @@ def update_npcs(
             if npc.job in {"build", "chop", "gather_food", "haul", "hunt", "haul_meat"} and npc.target_grid is None:
                 npc.action_grid = None
 
-            if group.is_raider:
+            if group.is_raider and not manual_control:
                 npc.job = "raid"
 
-            if npc.job == "idle" and npc.job_lock_timer == 0:
+            if npc.job == "idle" and npc.job_lock_timer == 0 and not manual_control:
                 def on_cooldown(job: str) -> bool:
                     return npc.task_cooldowns.get(job, 0.0) > 0.0
                 if npc.hunger > 0.6:
@@ -1096,6 +1098,21 @@ def update_npcs(
             if npc.job == "hunt":
                 if npc.hunt_target is not None and npc.hunt_target not in animals:
                     npc.hunt_target = None
+                if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
+                    door = find_home_door(group, world)
+                    if door is not None:
+                        npc.target_grid = door
+                        npc.action_grid = None
+                        npc.task_timer = 0.0
+                        drive_to_target(npc, npc.target_grid, 70)
+                        continue
+                    exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
+                    if exit_tile is not None:
+                        npc.target_grid = exit_tile
+                        npc.action_grid = None
+                        npc.task_timer = 0.0
+                        drive_to_target(npc, npc.target_grid, 70)
+                        continue
                 if npc.hunt_target is None:
                     npc.hunt_target = find_hunt_target(npc)
                 target = npc.hunt_target
@@ -1248,30 +1265,38 @@ def update_npcs(
                     drive_to_target(npc, npc.target_grid, 55)
             if npc.job == "chop":
                 if npc.target_grid is None:
-                    if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
-                        door = find_home_door(group, world)
-                        if door is not None:
-                            npc.target_grid = door
-                            npc.action_grid = None
-                            npc.task_timer = 0.0
-                            continue
-                        exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
-                        if exit_tile is not None:
-                            npc.target_grid = exit_tile
-                            npc.action_grid = None
-                            npc.task_timer = 0.0
-                            continue
-                    target = find_reachable_target(
-                        world,
-                        world.to_grid(npc.position),
-                        {"tree"},
-                        radius=12,
-                        home_grid=home_grid,
-                        home_radius=group.home_radius,
-                    )
-                    npc.action_grid = target
-                    if target is not None:
-                        npc.target_grid = find_adjacent_walkable(world, target, world.to_grid(npc.position))
+                    if npc.action_grid is None:
+                        if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
+                            door = find_home_door(group, world)
+                            if door is not None:
+                                npc.target_grid = door
+                                npc.action_grid = None
+                                npc.task_timer = 0.0
+                                continue
+                            exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
+                            if exit_tile is not None:
+                                npc.target_grid = exit_tile
+                                npc.action_grid = None
+                                npc.task_timer = 0.0
+                                continue
+                        target = find_reachable_target(
+                            world,
+                            world.to_grid(npc.position),
+                            {"tree"},
+                            radius=12,
+                            home_grid=home_grid,
+                            home_radius=group.home_radius,
+                        )
+                        npc.action_grid = target
+                        if target is not None:
+                            npc.target_grid = find_adjacent_walkable(world, target, world.to_grid(npc.position))
+                    else:
+                        npc.target_grid = find_adjacent_walkable(
+                            world,
+                            npc.action_grid,
+                            world.to_grid(npc.position),
+                            allow_doors=True,
+                        ) or npc.action_grid
                     npc.task_timer = 0.0
                 if npc.action_grid is None:
                     if npc.target_grid is not None:
@@ -1334,30 +1359,38 @@ def update_npcs(
                     npc.job = "idle"
                     npc.job_lock_timer = 0.4
                 elif npc.target_grid is None:
-                    if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
-                        door = find_home_door(group, world)
-                        if door is not None:
-                            npc.target_grid = door
-                            npc.action_grid = None
-                            npc.task_timer = 0.0
-                            continue
-                        exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
-                        if exit_tile is not None:
-                            npc.target_grid = exit_tile
-                            npc.action_grid = None
-                            npc.task_timer = 0.0
-                            continue
-                    target = find_reachable_target(
-                        world,
-                        world.to_grid(npc.position),
-                        {"rock"},
-                        radius=12,
-                        home_grid=home_grid,
-                        home_radius=group.home_radius,
-                    )
-                    npc.action_grid = target
-                    if target is not None:
-                        npc.target_grid = find_adjacent_walkable(world, target, world.to_grid(npc.position))
+                    if npc.action_grid is None:
+                        if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
+                            door = find_home_door(group, world)
+                            if door is not None:
+                                npc.target_grid = door
+                                npc.action_grid = None
+                                npc.task_timer = 0.0
+                                continue
+                            exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
+                            if exit_tile is not None:
+                                npc.target_grid = exit_tile
+                                npc.action_grid = None
+                                npc.task_timer = 0.0
+                                continue
+                        target = find_reachable_target(
+                            world,
+                            world.to_grid(npc.position),
+                            {"rock"},
+                            radius=12,
+                            home_grid=home_grid,
+                            home_radius=group.home_radius,
+                        )
+                        npc.action_grid = target
+                        if target is not None:
+                            npc.target_grid = find_adjacent_walkable(world, target, world.to_grid(npc.position))
+                    else:
+                        npc.target_grid = find_adjacent_walkable(
+                            world,
+                            npc.action_grid,
+                            world.to_grid(npc.position),
+                            allow_doors=True,
+                        ) or npc.action_grid
                     npc.task_timer = 0.0
                 if npc.action_grid is None:
                     if npc.target_grid is not None:
@@ -1408,25 +1441,38 @@ def update_npcs(
                             drive_to_target(npc, npc.target_grid, 55)
 
             elif npc.job == "gather_food":
-                if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
-                    door = find_home_door(group, world)
-                    if door is not None:
-                        npc.target_grid = door
-                        npc.action_grid = None
-                        npc.task_timer = 0.0
-                        continue
-                    exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
-                    if exit_tile is not None:
-                        npc.target_grid = exit_tile
-                        npc.action_grid = None
-                        npc.task_timer = 0.0
-                        continue
-                plant = plants.find_near(npc.position, radius_tiles=5)
-                if plant is None:
-                    npc.job_lock_timer = 0.6
+                if npc.action_grid is None:
+                    if abs(world.to_grid(npc.position)[0] - home_grid[0]) + abs(world.to_grid(npc.position)[1] - home_grid[1]) <= 2:
+                        door = find_home_door(group, world)
+                        if door is not None:
+                            npc.target_grid = door
+                            npc.action_grid = None
+                            npc.task_timer = 0.0
+                            continue
+                        exit_tile = find_work_zone_exit(group, world, world.to_grid(npc.position))
+                        if exit_tile is not None:
+                            npc.target_grid = exit_tile
+                            npc.action_grid = None
+                            npc.task_timer = 0.0
+                            continue
+                    plant = plants.find_near(npc.position, radius_tiles=5)
+                    if plant is not None:
+                        npc.action_grid = world.to_grid(plant.position)
                 else:
-                    npc.target_grid = world.to_grid(plant.position)
-                    npc.action_grid = npc.target_grid
+                    plant = plants.plants.get(npc.action_grid)
+                if plant is None:
+                    npc.job = "idle"
+                    npc.job_lock_timer = 0.4
+                    npc.action_grid = None
+                    npc.target_grid = None
+                else:
+                    if npc.target_grid is None:
+                        npc.target_grid = find_adjacent_walkable(
+                            world,
+                            npc.action_grid,
+                            world.to_grid(npc.position),
+                            allow_doors=True,
+                        ) or npc.action_grid
                     target_px = plant.position
                     if npc.position.distance_to(target_px) < 16:
                         npc.task_timer += dt
@@ -1470,6 +1516,23 @@ def update_npcs(
                     npc.action_grid = None
                 else:
                     drive_to_target(npc, npc.target_grid, 55)
+
+            if npc.job == "move":
+                if npc.target_grid is None:
+                    npc.job = "idle"
+                    npc.job_lock_timer = 0.2
+                    npc.action_grid = None
+                else:
+                    target_px = pygame.Vector2(
+                        (npc.target_grid[0] + 0.5) * TILE_SIZE,
+                        (npc.target_grid[1] + 0.5) * TILE_SIZE,
+                    )
+                    if npc.position.distance_to(target_px) < 12:
+                        npc.job = "idle"
+                        npc.target_grid = None
+                        npc.action_grid = None
+                    else:
+                        drive_to_target(npc, npc.target_grid, 70)
 
             elif npc.job == "build":
                 if not group.build_queue:
@@ -1527,6 +1590,9 @@ def update_npcs(
                             drive_to_target(npc, task_pos, 55)
 
             else:
+                if manual_control and npc.job in {"idle", "wander"}:
+                    npc.velocity *= 0.5
+                    continue
                 target = leader.position
                 if npc.position.distance_to(target) > 24:
                     drive_to_target(npc, world.to_grid(target), 50)

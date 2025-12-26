@@ -125,6 +125,82 @@ def transfer_item(
     return moved
 
 
+def issue_group_command(
+    npcs: list[NPC],
+    group_id: int,
+    job: str,
+    target_grid: tuple[int, int] | None,
+    action_grid: tuple[int, int] | None = None,
+    hunt_target: Animal | None = None,
+) -> None:
+    for npc in npcs:
+        if npc.group_id != group_id:
+            continue
+        npc.job = job
+        npc.job_lock_timer = 0.0
+        npc.task_timer = 0.0
+        npc.task_key = None
+        npc.task_commit_timer = 0.0
+        npc.task_cooldowns.pop(job, None)
+        npc.target_grid = target_grid
+        npc.action_grid = action_grid
+        npc.hunt_target = hunt_target if job == "hunt" else None
+        npc.eat_target = None
+        npc.path = []
+        npc.path_index = 0
+        npc.path_retries = 0
+        npc.path_target = None
+        npc.path_cooldown = 0.0
+
+
+def issue_npc_command(
+    npc: NPC,
+    job: str,
+    target_grid: tuple[int, int] | None,
+    action_grid: tuple[int, int] | None = None,
+    hunt_target: Animal | None = None,
+) -> None:
+    npc.job = job
+    npc.job_lock_timer = 0.0
+    npc.task_timer = 0.0
+    npc.task_key = None
+    npc.task_commit_timer = 0.0
+    npc.task_cooldowns.pop(job, None)
+    npc.target_grid = target_grid
+    npc.action_grid = action_grid
+    npc.hunt_target = hunt_target if job == "hunt" else None
+    npc.eat_target = None
+    npc.path = []
+    npc.path_index = 0
+    npc.path_retries = 0
+    npc.path_target = None
+    npc.path_cooldown = 0.0
+
+
+def infer_manual_command(
+    world: World,
+    plants: PlantManager,
+    animals: list[Animal],
+    mouse_world: pygame.Vector2,
+) -> tuple[str, tuple[int, int] | None, tuple[int, int] | None, Animal | None, str]:
+    grid_pos = world.to_grid(mouse_world)
+    tile = world.get_tile(grid_pos)
+    clicked_animal = next(
+        (a for a in animals if a.rect.collidepoint(mouse_world)),
+        None,
+    )
+    if clicked_animal is not None:
+        return ("hunt", None, None, clicked_animal, f"Hunt {clicked_animal.species}")
+    plant = plants.plants.get(grid_pos)
+    if plant is not None:
+        return ("gather_food", None, grid_pos, None, "Gather plant")
+    if tile == "tree":
+        return ("chop", None, grid_pos, None, "Chop tree")
+    if tile == "rock":
+        return ("mine", None, grid_pos, None, "Mine rock")
+    return ("move", grid_pos, None, None, "Move")
+
+
 def can_place_building(world: World, player: Player, grid_pos: tuple[int, int], build_item: str) -> bool:
     tile = world.get_tile(grid_pos)
     if grid_pos == world.to_grid(player.position):
@@ -326,6 +402,7 @@ def draw_hud(
     inventory_open: bool,
     group_info: str | None,
     smelt_timer: float,
+    manual_npc_control: bool,
 ) -> None:
     pickaxe_label = "Yes" if player.inventory.get("pickaxe", 0) > 0 else "No"
     lines = [
@@ -336,7 +413,7 @@ def draw_hud(
         ),
         (
             f"Tab: inventory ({'open' if inventory_open else 'closed'})  "
-            f"B: build mode ({'on' if build_mode else 'off'})  R: eat"
+            f"B: build mode ({'on' if build_mode else 'off'})  R: eat  F6: manual NPC"
         ),
     ]
     if build_mode:
@@ -347,6 +424,8 @@ def draw_hud(
         lines.append("Gathering: in progress")
     if smelt_timer > 0:
         lines.append(f"Smelting iron: {smelt_timer:.1f}s")
+    if manual_npc_control:
+        lines.append("Manual NPC control: ON (RMB command)")
     if status_message:
         lines.append(status_message)
     if group_info:
@@ -1089,6 +1168,8 @@ class Game:
                         ui.npc_debug_view = not ui.npc_debug_view
                     elif event.key == pygame.K_F5:
                         ui.civ_debug_view = not ui.civ_debug_view
+                    elif event.key == pygame.K_F6:
+                        ui.manual_npc_control = not ui.manual_npc_control
                     elif event.key in (pygame.K_EQUALS, pygame.K_KP_PLUS):
                         ui.minimap_zoom = min(3, ui.minimap_zoom + 1)
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -1245,13 +1326,19 @@ class Game:
                     if event.button == 1 and not ui.inventory_open:
                         mouse_world = camera.screen_to_world(pygame.Vector2(event.pos))
                         clicked_group = None
+                        clicked_npc = None
                         for npc in npcs:
                             if npc.rect.collidepoint(mouse_world):
                                 clicked_group = npc.group_id
+                                clicked_npc = npc
                                 break
                         if clicked_group is None and ui.group_panel_rect.collidepoint(event.pos):
                             clicked_group = ui.selected_group_id
                         ui.selected_group_id = clicked_group
+                        if clicked_npc is not None:
+                            ui.selected_npc_id = clicked_npc.npc_id
+                        elif not ui.npc_debug_view:
+                            ui.selected_npc_id = None
                         if clicked_group is None and not ui.build_mode:
                             attacked = perform_player_swing(
                                 player,
@@ -1264,6 +1351,46 @@ class Game:
                                 actions.status_timer = 0.4
                     if ui.inventory_open:
                         continue
+                    if ui_consumed:
+                        continue
+                    if event.button == 3 and ui.manual_npc_control and not ui.build_mode and not in_cave:
+                        selected_npc = None
+                        if ui.selected_npc_id is not None:
+                            selected_npc = next((n for n in npcs if n.npc_id == ui.selected_npc_id), None)
+                            if selected_npc is None:
+                                ui.selected_npc_id = None
+                        if selected_npc is None and ui.selected_group_id is None:
+                            actions.status_message = "Select a group or NPC"
+                            actions.status_timer = 1.2
+                        else:
+                            mouse_world = camera.screen_to_world(pygame.Vector2(event.pos))
+                            job, target_grid, action_grid, hunt_target, label = infer_manual_command(
+                                overworld,
+                                plants,
+                                animals,
+                                mouse_world,
+                            )
+                            if selected_npc is not None:
+                                issue_npc_command(
+                                    selected_npc,
+                                    job,
+                                    target_grid,
+                                    action_grid,
+                                    hunt_target,
+                                )
+                                actions.status_message = f"NPC: {label}"
+                            else:
+                                issue_group_command(
+                                    npcs,
+                                    ui.selected_group_id,
+                                    job,
+                                    target_grid,
+                                    action_grid,
+                                    hunt_target,
+                                )
+                                actions.status_message = f"Group: {label}"
+                            actions.status_timer = 0.8
+                        ui_consumed = True
                     if ui_consumed:
                         continue
                     if event.button == 1 and ui.build_mode and not in_cave:
@@ -1564,7 +1691,18 @@ class Game:
                         raid["completed"] = True
 
                 npc_debug.clear()
-                update_npcs(npcs, npc_groups, overworld, plants, animals, carcasses, dt, raids, npc_debug if ui.npc_debug_view else None)
+                update_npcs(
+                    npcs,
+                    npc_groups,
+                    overworld,
+                    plants,
+                    animals,
+                    carcasses,
+                    dt,
+                    ui.manual_npc_control,
+                    raids,
+                    npc_debug if ui.npc_debug_view else None,
+                )
                 npcs = [n for n in npcs if n.hp > 0]
                 for group_id, group in list(npc_groups.items()):
                     members = [n for n in npcs if n.group_id == group_id]
@@ -1844,7 +1982,40 @@ class Game:
                 ui.inventory_open,
                 group_info,
                 actions.smelt_timer,
+                ui.manual_npc_control,
             )
+
+            if ui.manual_npc_control and not ui.inventory_open and not ui.map_open and not ui.build_mode and not in_cave:
+                mouse_pos = pygame.Vector2(pygame.mouse.get_pos())
+                mouse_world = camera.screen_to_world(mouse_pos)
+                _job, _tgt, _act, _hunt, label = infer_manual_command(
+                    overworld,
+                    plants,
+                    animals,
+                    mouse_world,
+                )
+                selected_label = None
+                if ui.selected_npc_id is not None:
+                    selected_label = f"NPC {ui.selected_npc_id}"
+                elif ui.selected_group_id is not None:
+                    selected_label = f"Group g{ui.selected_group_id}"
+                if selected_label is None:
+                    hint = "RMB: select NPC or group"
+                else:
+                    hint = f"RMB: {label} ({selected_label})"
+                hint_surf = font.render(hint, True, COLORS["ui_text"])
+                pad = 6
+                hint_rect = hint_surf.get_rect()
+                hint_rect.topleft = (int(mouse_pos.x + 12), int(mouse_pos.y + 12))
+                bg_rect = pygame.Rect(
+                    hint_rect.x - pad,
+                    hint_rect.y - pad,
+                    hint_rect.width + pad * 2,
+                    hint_rect.height + pad * 2,
+                )
+                pygame.draw.rect(screen, (8, 10, 14), bg_rect)
+                pygame.draw.rect(screen, (60, 70, 80), bg_rect, 1)
+                screen.blit(hint_surf, hint_rect)
 
             ui.group_panel_rect = pygame.Rect(0, 0, 0, 0)
             if not ui.npc_debug_view and ui.selected_group_id is not None and ui.selected_group_id in npc_groups:

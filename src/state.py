@@ -18,6 +18,7 @@ class UIState:
     debug_view: bool = False
     npc_debug_view: bool = False
     civ_debug_view: bool = False
+    manual_npc_control: bool = False
     selected_group_id: int | None = None
     selected_npc_id: int | None = None
     group_panel_rect: pygame.Rect = field(default_factory=lambda: pygame.Rect(0, 0, 0, 0))
